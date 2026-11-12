@@ -1,0 +1,362 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * worklog: preview and export CSV worklogs (WORKLOG_<id>.csv).
+ *
+ * Columns: date, hours, task_description, and an optional budget.
+ * This one file is both the CLI and the router for PHP's built-in server.
+ */
+
+const LABELS = [
+    'en' => [
+        'index' => 'Work logs',
+        'title' => 'Work log — %s',
+        'back' => 'All work logs',
+        'date' => 'Date',
+        'task' => 'Task',
+        'hours' => 'Hours',
+        'total' => 'Total',
+        'other' => 'Other',
+        'decimal' => '.',
+    ],
+    'sk' => [
+        'index' => 'Pracovné výkazy',
+        'title' => 'Pracovný výkaz — %s',
+        'back' => 'Všetky výkazy',
+        'date' => 'Dátum',
+        'task' => 'Popis práce',
+        'hours' => 'Hodiny',
+        'total' => 'Spolu',
+        'other' => 'Ostatné',
+        'decimal' => ',',
+    ],
+];
+
+const USAGE = <<<'TXT'
+    Usage:
+      worklog [serve] [dir]     Preview WORKLOG_*.csv files in the browser
+      worklog pdf <id> [dir]    Export WORKLOG_<id>.csv to WORKLOG_<id>.pdf
+
+    Options:
+      --lang=en|sk   Labels and number format (default: en)
+      --port=N       Port for serve (default: first free from 8765)
+      --no-open      Do not open the browser
+      --out=DIR      Folder for the PDF (default: current directory)
+
+    [dir] defaults to the current directory, or its docs/ folder when the CSV files are there.
+
+    TXT;
+
+// ——— Worklog files ———
+
+function resolve_dir(string $dir): string
+{
+    if (!glob("{$dir}/WORKLOG_*.csv") && is_dir("{$dir}/docs")) {
+        $dir .= '/docs';
+    }
+
+    return realpath($dir) ?: throw new RuntimeException("Not a directory: {$dir}");
+}
+
+/** @return list<string> Newest first. */
+function worklog_ids(string $dir): array
+{
+    $ids = array_map(static fn ($path) => substr(basename($path, '.csv'), 8), glob("{$dir}/WORKLOG_*.csv") ?: []);
+    rsort($ids);
+
+    return $ids;
+}
+
+/** @return list<array{date: string, hours: float, budget: string, task: string}> */
+function read_worklog(string $dir, string $id): array
+{
+    $path = "{$dir}/WORKLOG_{$id}.csv";
+    if (!preg_match('/^[\w.-]+$/', $id) || !is_file($path)) {
+        throw new RuntimeException("No WORKLOG_{$id}.csv in {$dir}");
+    }
+
+    $handle = fopen($path, 'rb');
+    $columns = array_flip(array_map('trim', fgetcsv($handle, null, ',', '"', '')));
+    $rows = [];
+    while (($cells = fgetcsv($handle, null, ',', '"', '')) !== false) {
+        if ($cells === [null]) {
+            continue;
+        }
+        $cell = static fn (string $name): string => trim($cells[$columns[$name] ?? -1] ?? '');
+        $rows[] = [
+            'date' => $cell('date'),
+            'hours' => (float) $cell('hours'),
+            'budget' => $cell('budget') === 'default' ? '' : $cell('budget'),
+            'task' => $cell('task_description'),
+        ];
+    }
+    fclose($handle);
+
+    return $rows;
+}
+
+// ——— HTML ———
+
+function e(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+}
+
+function hours(float $hours, string $lang): string
+{
+    $decimal = LABELS[$lang]['decimal'];
+
+    return rtrim(rtrim(number_format($hours, 2, $decimal, ''), '0'), $decimal) . ' h';
+}
+
+function page(string $title, string $body, string $lang, bool $back = false): string
+{
+    $nav = $back ? '<nav>&larr;&nbsp;<a href="/">' . e(LABELS[$lang]['back']) . '</a></nav>' : '';
+
+    return <<<HTML
+        <!doctype html>
+        <html lang="{$lang}">
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{$title}</title>
+        <style>
+        body { margin: 0; padding: 1rem; font: 1rem/1.25 system-ui, sans-serif; color: #000; background: #fff; }
+        a { color: inherit; }
+        nav { margin-bottom: 1rem; }
+        h1 { margin: 0; font-size: inherit; }
+        .note { color: #555; white-space: nowrap; }
+        ul { list-style: none; margin: 1rem 0 0; padding: 1rem 0 0; border-top: 1px solid #ddd; }
+        li + li { margin-top: 0.5rem; }
+        table { width: 100%; margin-top: 2rem; border-collapse: collapse; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
+        th, td { padding: 0 1rem 0.5rem; text-align: left; vertical-align: top; }
+        tr { break-inside: avoid; }
+        th:first-child, td:first-child { padding-left: 0; }
+        th:last-child, td:last-child { padding-right: 0; text-align: right; }
+        thead th { padding-top: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
+        tbody tr:first-child td { padding-top: 1rem; }
+        tbody tr:last-child td { padding-bottom: 1rem; }
+        tfoot { display: table-row-group; }
+        tfoot tr:first-child td { padding-top: 1rem; border-top: 1px solid #ddd; }
+        tfoot tr:last-child td { padding-bottom: 1rem; font-weight: 600; }
+        .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+        @page { size: A4; margin: 15mm; }
+        @media print { html { font-size: 14px; } body { padding: 0; } nav { display: none; } }
+        </style>
+        </head>
+        <body>
+        {$nav}
+        <main>
+        {$body}
+        </main>
+        </body>
+        </html>
+
+        HTML;
+}
+
+function render_index(string $dir, string $lang): string
+{
+    $labels = LABELS[$lang];
+    $items = '';
+    foreach (worklog_ids($dir) as $id) {
+        $total = array_sum(array_column(read_worklog($dir, $id), 'hours'));
+        $items .= sprintf(
+            "<li><a href=\"/%s\">%s</a> <span class=\"note\">— %s</span></li>\n",
+            e($id),
+            e(sprintf($labels['title'], $id)),
+            hours($total, $lang),
+        );
+    }
+
+    return page(e($labels['index']), '<h1>' . e($labels['index']) . "</h1>\n<ul>\n{$items}</ul>", $lang);
+}
+
+/** @param list<array{date: string, hours: float, budget: string, task: string}> $rows */
+function render_worklog(string $id, array $rows, string $lang): string
+{
+    $labels = LABELS[$lang];
+    $title = e(sprintf($labels['title'], $id));
+
+    // One budget for the whole log: name it once by the title. Mixed: label rows and subtotal.
+    $budgets = [];
+    foreach ($rows as $row) {
+        $budgets[$row['budget']] = ($budgets[$row['budget']] ?? 0.0) + $row['hours'];
+    }
+    $mixed = count($budgets) > 1;
+    $only = $mixed ? '' : (string) array_key_first($budgets);
+    $heading = $title . ($only === '' ? '' : ' <span class="note">(' . e($only) . ')</span>');
+
+    $body = '';
+    foreach ($rows as $row) {
+        $note = $mixed && $row['budget'] !== '' ? ' <span class="note">(' . e($row['budget']) . ')</span>' : '';
+        $body .= sprintf(
+            "<tr><td class=\"num\">%s</td><td>%s%s</td><td class=\"num\">%s</td></tr>\n",
+            e($row['date']),
+            e($row['task']),
+            $note,
+            hours($row['hours'], $lang),
+        );
+    }
+
+    $foot = '';
+    foreach ($mixed ? $budgets : [] as $budget => $total) {
+        $foot .= sprintf(
+            "<tr><td colspan=\"2\" class=\"note\">%s</td><td class=\"num note\">%s</td></tr>\n",
+            e($budget === '' ? $labels['other'] : (string) $budget),
+            hours($total, $lang),
+        );
+    }
+    $foot .= sprintf(
+        "<tr><td colspan=\"2\">%s</td><td class=\"num\">%s</td></tr>\n",
+        e($labels['total']),
+        hours(array_sum(array_column($rows, 'hours')), $lang),
+    );
+
+    return page($title, <<<HTML
+        <h1>{$heading}</h1>
+        <table>
+        <thead><tr><th scope="col">{$labels['date']}</th><th scope="col">{$labels['task']}</th><th scope="col">{$labels['hours']}</th></tr></thead>
+        <tbody>
+        {$body}</tbody>
+        <tfoot>
+        {$foot}</tfoot>
+        </table>
+        HTML, $lang, true);
+}
+
+/** Solid blue 16×16 icon, same as garner-cms-php. */
+function favicon(): string
+{
+    $pixels = str_repeat(pack('C4', 255, 0, 0, 255), 16 * 16) . str_repeat("\x00", 64); // BGRA pixels + AND mask
+    $image = pack('V3v2V6', 40, 16, 32, 1, 32, 0, strlen($pixels), 0, 0, 0, 0) . $pixels;
+
+    return pack('v3', 0, 1, 1) . pack('C4v2V2', 16, 16, 0, 0, 1, 32, strlen($image), 22) . $image;
+}
+
+// ——— Commands ———
+
+function serve(string $dir, string $lang, ?int $port, bool $open): int
+{
+    if ($port === null) {
+        $port = 8765;
+        while (@fsockopen('127.0.0.1', $port)) {
+            $port++;
+        }
+    }
+
+    $env = array_merge(getenv(), ['WORKLOG_DIR' => $dir, 'WORKLOG_LANG' => $lang]);
+    $process = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", __FILE__], [STDIN, STDOUT, STDERR], $pipes, null, $env);
+    while (!@fsockopen('127.0.0.1', $port) && proc_get_status($process)['running']) {
+        usleep(50_000);
+    }
+
+    $url = "http://127.0.0.1:{$port}/";
+    fwrite(STDERR, "worklog  {$dir}\n         {$url}  (Ctrl+C to stop)\n");
+    if ($open) {
+        exec('open ' . escapeshellarg($url));
+    }
+
+    return proc_close($process);
+}
+
+function export_pdf(string $dir, string $id, string $lang, string $out): int
+{
+    $html = render_worklog($id, read_worklog($dir, $id), $lang);
+    $chrome = getenv('WORKLOG_CHROME') ?: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    $tmp = sys_get_temp_dir() . '/worklog-' . bin2hex(random_bytes(6));
+    mkdir($tmp);
+    file_put_contents("{$tmp}/worklog.html", $html);
+    $pdf = "{$out}/WORKLOG_{$id}.pdf";
+
+    exec(implode(' ', array_map('escapeshellarg', [
+        $chrome,
+        '--headless',
+        '--no-pdf-header-footer',
+        "--user-data-dir={$tmp}/profile",
+        "--print-to-pdf={$pdf}",
+        "file://{$tmp}/worklog.html",
+    ])) . ' 2>/dev/null', $output, $code);
+    exec('rm -rf ' . escapeshellarg($tmp));
+
+    if ($code !== 0) {
+        throw new RuntimeException('Chrome could not export the PDF.');
+    }
+    fwrite(STDERR, "Saved {$pdf}\n");
+
+    return 0;
+}
+
+function main(array $args): int
+{
+    $options = [];
+    $positional = [];
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, '-')) {
+            [$name, $value] = array_pad(explode('=', ltrim($arg, '-'), 2), 2, true);
+            $options[$name] = $value;
+        } else {
+            $positional[] = $arg;
+        }
+    }
+
+    if (isset($options['help']) || isset($options['h'])) {
+        echo USAGE;
+
+        return 0;
+    }
+
+    $lang = (string) ($options['lang'] ?? 'en');
+    if (!isset(LABELS[$lang])) {
+        throw new RuntimeException('--lang must be one of: ' . implode(', ', array_keys(LABELS)));
+    }
+
+    if (($positional[0] ?? '') === 'pdf') {
+        if (!isset($positional[1])) {
+            throw new RuntimeException("worklog pdf needs a worklog id.\n\n" . USAGE);
+        }
+
+        return export_pdf(resolve_dir($positional[2] ?? '.'), $positional[1], $lang, realpath((string) ($options['out'] ?? '.')) ?: throw new RuntimeException('Not a directory: ' . $options['out']));
+    }
+
+    if (($positional[0] ?? '') === 'serve') {
+        array_shift($positional);
+    }
+    $port = isset($options['port']) ? (int) $options['port'] : null;
+
+    return serve(resolve_dir($positional[0] ?? '.'), $lang, $port, !isset($options['no-open']));
+}
+
+// ——— Entry point ———
+
+if (PHP_SAPI === 'cli-server') {
+    $dir = getenv('WORKLOG_DIR') ?: resolve_dir('.');
+    $lang = getenv('WORKLOG_LANG') ?: 'en';
+    $id = trim(rawurldecode((string) parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH)), '/');
+    if ($id === 'favicon.ico') {
+        header('Content-Type: image/x-icon');
+        echo favicon();
+
+        return;
+    }
+    header('Content-Type: text/html; charset=utf-8');
+
+    try {
+        echo $id === '' ? render_index($dir, $lang) : render_worklog($id, read_worklog($dir, $id), $lang);
+    } catch (RuntimeException $error) {
+        http_response_code(404);
+        echo page('Not found', '<p>' . e($error->getMessage()) . '</p>', $lang, true);
+    }
+
+    return;
+}
+
+try {
+    exit(main(array_slice($_SERVER['argv'], 1)));
+} catch (RuntimeException $error) {
+    fwrite(STDERR, 'worklog: ' . $error->getMessage() . PHP_EOL);
+    exit(1);
+}

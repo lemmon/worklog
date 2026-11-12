@@ -1,0 +1,11 @@
+{
+    "name": "lemmon/worklog",
+    "description": "Preview CSV worklogs in the browser and export them to PDF",
+    "type": "library",
+    "require": {
+        "php": ">=8.3"
+    },
+    "bin": [
+        "bin/worklog"
+    ]
+}
