@@ -9,6 +9,7 @@ date,hours,budget,task_description
 2026-10-21,1.00,framework,"Intro call: form email problem, maintenance"
 ```
 
+- `hours` in quarter hours. Hours are always shown with two decimals (`0.25 h`, `1.50 h`).
 - `budget` is optional. Empty or `default` means no budget.
 - A log with one budget names it next to the title. A log with mixed budgets labels each row and adds subtotals.
 

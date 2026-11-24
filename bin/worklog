@@ -107,9 +107,8 @@ function e(string $value): string
 
 function hours(float $hours, string $lang): string
 {
-    $decimal = LABELS[$lang]['decimal'];
-
-    return rtrim(rtrim(number_format($hours, 2, $decimal, ''), '0'), $decimal) . ' h';
+    // Always two decimals: logs are kept in quarter hours (0.25, 1.50).
+    return number_format($hours, 2, LABELS[$lang]['decimal'], '') . ' h';
 }
 
 function page(string $title, string $body, string $lang, bool $back = false): string
